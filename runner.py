@@ -111,7 +111,7 @@ class Runner:
             total_reward += reward
 
         self.env.close()
-        imageio.mimsave(filename, frames, fps=30)
+        imageio.mimsave(filename, frames, fps=30, loop=0)  # loop=0 means infinite loop
         print(f"Saved GIF to {filename} (Total reward: {total_reward:.1f}, Steps: {step_count})")
     
     def plot_metrics(self, filename=None):
