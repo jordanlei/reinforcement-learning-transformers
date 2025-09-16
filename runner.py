@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter1d
 import pickle
 from torch.distributions import Categorical
+import copy
 
 
 class ReplayBuffer:
@@ -27,11 +28,12 @@ class ReplayBuffer:
         batch = random.sample(self.buffer, batch_size)
         state, action, reward, next_state, done = zip(*batch)
 
-        state = torch.tensor(state, dtype=torch.float32, device=device)
-        action = torch.tensor(action, dtype=torch.long, device=device)
-        reward = torch.tensor(reward, dtype=torch.float32, device=device)
-        next_state = torch.tensor(next_state, dtype=torch.float32, device=device)
-        done = torch.tensor(done, dtype=torch.float32, device=device)
+        # Convert to numpy arrays first to avoid the warning
+        state = torch.tensor(np.array(state), dtype=torch.float32, device=device)
+        action = torch.tensor(np.array(action), dtype=torch.long, device=device)
+        reward = torch.tensor(np.array(reward), dtype=torch.float32, device=device)
+        next_state = torch.tensor(np.array(next_state), dtype=torch.float32, device=device)
+        done = torch.tensor(np.array(done), dtype=torch.float32, device=device)
 
         return state, action, reward, next_state, done
 
@@ -143,18 +145,20 @@ class Runner:
 
 
 class DQNRunner(Runner):
-    def __init__(self, env, model, optimizer, device, gamma=0.99, batch_size=32, epsilon=0.1):
+    def __init__(self, env, model, optimizer, device, gamma=0.99, batch_size=64, epsilon_start=1.0, epsilon_end=0.01, epsilon_decay=0.995):
         super().__init__(env, device, gamma)
         self.model = model.to(self.device)
         self.optimizer = optimizer
         # Initialize target network
-        self.target_model = type(model)(model.net[0].in_features, model.net[-1].out_features).to(self.device)
-        self.target_model.load_state_dict(self.model.state_dict())
+        self.target_model = copy.deepcopy(model).to(self.device)
         self.target_model.eval()
 
-        self.replay_buffer = ReplayBuffer(capacity=10000)
+        self.replay_buffer = ReplayBuffer(capacity=50000)
         self.batch_size = batch_size
-        self.epsilon = epsilon
+        self.epsilon = epsilon_start
+        self.epsilon_start = epsilon_start
+        self.epsilon_end = epsilon_end
+        self.epsilon_decay = epsilon_decay
 
     def select_action(self, state):
         if random.random() < self.epsilon:
@@ -163,6 +167,10 @@ class DQNRunner(Runner):
         state_t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
         with torch.no_grad():
             return self.model(state_t).argmax(dim=1).item(), None
+    
+    def update_epsilon(self):
+        """Update epsilon for epsilon-greedy exploration"""
+        self.epsilon = max(self.epsilon_end, self.epsilon * self.epsilon_decay)
 
     def train_step(self, target_update_freq=100):
         if len(self.replay_buffer) < self.batch_size:
@@ -207,6 +215,9 @@ class DQNRunner(Runner):
                 self.replay_buffer.push(state, action, reward, next_state, done)
                 loss = self.train_step()
                 progress_bar.update(1)
+                
+                # Update epsilon for exploration
+                self.update_epsilon()
 
                 if loss is not None:
                     self.metrics['losses'].append(loss)
@@ -220,8 +231,9 @@ class DQNRunner(Runner):
                     self.metrics['episodes'].append(episode)
                     progress_bar.set_description(
                     f"Training: Episode {episode}, "
-                    f"Reward: {self.metrics['rewards'][-1]}, "
+                    f"Reward: {self.metrics['rewards'][-1]:.2f}, "
                     f"Steps: {self.steps}, "
+                    f"Epsilon: {self.epsilon:.3f}, "
                     f"Loss: {np.mean(self.metrics['losses'][-100:]): .2f}"
                     )
                     episode += 1
@@ -236,6 +248,7 @@ class PolicyGradientRunner(Runner):
         self.model = model.to(self.device)
         self.optimizer = optimizer
         self.rewards, self.log_probs = [], []
+        self.reward_history = []  # For reward normalization
     
     def select_action(self, state):
         state_t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
@@ -256,13 +269,22 @@ class PolicyGradientRunner(Runner):
         returns = torch.tensor(returns, dtype=torch.float32, device=self.device)
         log_probs = torch.stack(self.log_probs).squeeze()
 
+        # Store episode reward for normalization
+        episode_reward = returns[0].item()  # First return is the total episode reward
+        self.reward_history.append(episode_reward)
+        
+        # Keep only recent history for normalization (rolling window)
+        if len(self.reward_history) > 1000:
+            self.reward_history = self.reward_history[-1000:]
 
-        # baselining for stability (optional)
         returns = returns - returns.mean()
-
         loss = -(returns * log_probs).mean()
         self.optimizer.zero_grad()
         loss.backward()
+        
+        # Gradient clipping for stability
+        torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
+        
         self.optimizer.step()
 
         self.rewards, self.log_probs = [], []
@@ -316,36 +338,42 @@ class ActorCriticRunner(Runner):
         self.critic = critic.to(self.device)
         self.actor_optimizer = actor_optimizer
         self.critic_optimizer = critic_optimizer
+        self.reward_history = []  # For reward normalization
 
     def select_action(self, state):
         state_t = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
-        action_probs = F.softmax(self.actor(state_t), dim=1)
-        C = Categorical(action_probs)
+        logits = self.actor(state_t)
+        C = Categorical(logits=logits)
         action = C.sample()
-        log_prob = C.log_prob(action)
-        entropy = C.entropy()
-        return action.item(), (log_prob, entropy)
+        return action.item(), None
     
-    def train_step(self, state, action, reward, next_state, done, log_prob, entropy):
+    def train_step(self, state, action, reward, next_state, done):
         state = torch.tensor(state, dtype=torch.float32, device=self.device).unsqueeze(0)
         next_state = torch.tensor(next_state, dtype=torch.float32, device=self.device).unsqueeze(0)
 
-        log_prob = log_prob.squeeze()
-        entropy = entropy.squeeze()
+        logits = self.actor(state)
+        C = Categorical(logits=logits)
+        log_prob = C.log_prob(torch.tensor([action], device=self.device))
+        entropy = C.entropy()
+
         state_value = self.critic(state).squeeze()
         next_state_value = self.critic(next_state).squeeze().detach() if not done else 0
+
         advantage = reward + self.gamma * next_state_value - state_value
-
-        actor_loss = -(advantage.detach() * log_prob - 0.01 * entropy).mean()
-        critic_loss = 0.01 * advantage.pow(2).mean()
-
-        self.actor_optimizer.zero_grad()
-        actor_loss.backward()
-        self.actor_optimizer.step()
-
+        critic_loss = 0.5 * advantage.pow(2).mean()
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
         self.critic_optimizer.step()
+
+        actor_loss = -(advantage.detach() * log_prob).mean()
+        
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
+        self.actor_optimizer.step()
+
+        
         return actor_loss.item(), critic_loss.item()
 
     def run(self, n_episodes=1000, max_steps=1e4):
@@ -358,13 +386,13 @@ class ActorCriticRunner(Runner):
             episode_reward = 0
 
             while self.steps < max_steps:
-                action, (log_prob, entropy) = self.select_action(state)
+                action, _ = self.select_action(state)
                 next_state, reward, terminated, truncated, info = self.env.step(action)
                 self.steps += 1
                 progress_bar.update(1)
                 done = terminated or truncated
                 episode_reward += reward
-                actor_loss, critic_loss = self.train_step(state, action, reward, next_state, done, log_prob, entropy)
+                actor_loss, critic_loss = self.train_step(state, action, reward, next_state, done)
                 self.metrics['actor_losses'].append(actor_loss)
                 self.metrics['critic_losses'].append(critic_loss)
                 self.metrics['steps'].append(self.steps)
@@ -380,7 +408,7 @@ class ActorCriticRunner(Runner):
                         f"Training: Episode {episode}, "
                         f"Reward: {self.metrics['rewards'][-1]}, "
                         f"Steps: {self.steps}, "
-                        f"Actor Loss: {np.mean(self.metrics['actor_losses'][-100:]): .2f}, "
+                        f"Actor Loss: {100 * np.mean(self.metrics['actor_losses'][-100:]): .2f}, "
                         f"Critic Loss: {np.mean(self.metrics['critic_losses'][-100:]): .2f}"
                     )
                     episode += 1

@@ -1,10 +1,11 @@
 # Reinforcement Learning Transformers
 
-A comprehensive PyTorch implementation of various reinforcement learning algorithms for solving the CartPole-v1 environment. This project demonstrates different approaches to reinforcement learning, from classic Deep Q-Networks to modern Actor-Critic methods.
+A comprehensive PyTorch implementation of various reinforcement learning algorithms for solving classic control environments. This project demonstrates different approaches to reinforcement learning, from classic Deep Q-Networks to modern Actor-Critic methods, with support for LunarLander-v3 environment.
 
 ## 🎯 Overview
 
-This project showcases multiple reinforcement learning algorithms trained on the CartPole-v1 environment from OpenAI Gymnasium. Each algorithm learns to balance a pole on a cart by taking actions (left/right) to maximize cumulative reward.
+This project showcases multiple reinforcement learning algorithms trained on classic environments from OpenAI Gymnasium. The algorithms can learn to:
+- **LunarLander-v3**: Land a spacecraft on the moon by controlling thrusters and orientation to maximize cumulative reward
 
 ## 🚀 Live Demos
 
@@ -26,7 +27,7 @@ This project showcases multiple reinforcement learning algorithms trained on the
 ## 🏗️ Project Structure
 
 ```
-├── cartpole.py              # Main training script
+├── simulate.py              # Main training script
 ├── network.py               # Neural network architectures
 ├── runner.py                # Training runners and utilities
 ├── demos/
@@ -64,30 +65,32 @@ pip install -r requirements.txt
 
 ### Quick Start
 
-Train a DQN agent with default settings:
+Train all algorithms (DQN, Policy Gradient, Actor-Critic) with default settings:
 ```bash
-python cartpole.py
+python simulate.py
 ```
 
 ### Custom Training
 
 ```python
 import gymnasium as gym
-from network import QNetwork
+from network import Feedforward
 from runner import DQNRunner
 import torch
 
 # Create environment
-env = gym.make("CartPole-v1", render_mode="rgb_array")
-device = torch.device("mps" if torch.backends.mps.is_available() else "cpu")
+env = gym.make("LunarLander-v3", render_mode="rgb_array")
+device = torch.device("mps" if torch.backends.mps.is_available() else "cuda" if torch.cuda.is_available() else "cpu")
 
 # Initialize model and optimizer
-net = QNetwork(state_dim=env.observation_space.shape[0], action_dim=env.action_space.n)
-optimizer = torch.optim.Adam(net.parameters(), lr=0.0001)
+net = Feedforward(state_dim=env.observation_space.shape[0], action_dim=env.action_space.n, 
+                  hidden_dims=[256, 256, 128])
+optimizer = torch.optim.Adam(net.parameters(), lr=1e-3)
 
 # Create runner and train
-runner = DQNRunner(env, net, optimizer, device)
-runner.run(n_episodes=200)
+runner = DQNRunner(env, net, optimizer, device, batch_size=64, 
+                   epsilon_start=1.0, epsilon_end=0.01, epsilon_decay=0.995)
+runner.run(n_episodes=200000, max_steps=200000)
 
 # Generate demo
 runner.play_and_save_gif(title="My Custom Agent", filename="my_demo.gif")
@@ -98,30 +101,30 @@ runner.play_and_save_gif(title="My Custom Agent", filename="my_demo.gif")
 ### 1. Deep Q-Network (DQN)
 - **Type**: Value-based
 - **Key Features**: Experience replay, target network, epsilon-greedy exploration
-- **Architecture**: 3-layer MLP (128-128-output)
+- **Architecture**: Configurable Feedforward network (default: 256-256-128-output)
 - **Best For**: Discrete action spaces, stable learning
 
 ### 2. Actor-Critic
 - **Type**: Actor-Critic
 - **Key Features**: Separate actor and critic networks, advantage estimation
-- **Architecture**: Shared feature extractor with separate heads
+- **Architecture**: Independent Feedforward networks for actor and critic
 - **Best For**: Continuous and discrete actions, sample efficiency
 
 ### 3. Policy Gradient (REINFORCE)
 - **Type**: Policy-based
 - **Key Features**: Direct policy optimization, baseline subtraction
-- **Architecture**: Policy network with softmax output
+- **Architecture**: Feedforward network with softmax output
 - **Best For**: Policy optimization, on-policy learning
 
 ## 📊 Performance Metrics
 
 | Algorithm | Avg Reward | Episodes to Solve | Sample Efficiency |
 |-----------|------------|-------------------|-------------------|
-| DQN | ~195+ | 100-200 | Medium |
-| Actor-Critic | ~195+ | 50-150 | High |
-| Policy Gradient | ~180+ | 200-400 | Low |
+| DQN | ~200+ | 100-300 | Medium |
+| Actor-Critic | ~200+ | 50-200 | High |
+| Policy Gradient | ~150+ | 200-500 | Low |
 
-*Results may vary based on hyperparameters and random seeds*
+*Results may vary based on hyperparameters and random seeds. LunarLander-v3 is considered solved at 200+ average reward.*
 
 ## ⚙️ Key Features
 
@@ -169,8 +172,9 @@ runner = DQNRunner(
     env, net, optimizer, device,
     batch_size=64,       # Batch size for training
     gamma=0.99,          # Discount factor
-    epsilon=0.05,        # Exploration rate
-    replay_buffer_size=20000  # Experience replay buffer size
+    epsilon_start=1.0,   # Initial exploration rate
+    epsilon_end=0.01,    # Final exploration rate
+    epsilon_decay=0.995  # Exploration decay rate
 )
 ```
 
@@ -183,11 +187,14 @@ runner = DQNRunner(
 - `imageio` - GIF creation and video processing
 - `numpy` - Numerical computations
 - `tqdm` - Progress bars
+- `scipy` - Scientific computing
+- `box2d-py` - Physics engine for LunarLander environment
 
 ### Optional Dependencies
 - `jupyter` - Interactive notebooks
 - `opencv-python` - Image processing
-- `scipy` - Scientific computing
+- `jax` - High-performance machine learning library
+- `flax` - Neural network library for JAX
 
 ## 🔬 Research Applications
 
